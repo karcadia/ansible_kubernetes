@@ -1,7 +1,10 @@
 ---
 - hosts: all
-  defaults:
-    container_runtime: docker
+  vars:
+    container_runtime: docker 
+    kube_dns_domain: kube.mccormicom.com
+    cni_plugin: flannel
+    pod_network_cidr: 10.42.0.0/16
   become: yes
   tasks:
     - name: Check assertions.
@@ -18,6 +21,14 @@
       shell:
         cmd: lsmod br_netfilter || modprobe br_netfilter
 
+    - name: Configure sysctl.
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
     - name: Disable swap permanently.
       mount:
         fstype: swap
@@ -27,14 +38,18 @@
     - name: Disable swap now.
       command: swapoff -a
 
-    - name: Install required packages.
+    - name: Install basic tools.
       package:
         name: "{{ item }}"
       loop:
         - vim
         - sudo
-        - glances
         - curl
+
+    - name: Install required packages.
+      package:
+        name: "{{ item }}"
+      loop:
         - apt-transport-https
         - ca-certificates
 
@@ -43,7 +58,7 @@
         dest: /etc/apt/sources.list.d/kubernetes.list
         content: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" 
 
-    - name: Deploy keys for for Kubernetes apt source.
+    - name: Deploy keys for Kubernetes apt source.
       get_url:
         url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
         dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
@@ -60,8 +75,154 @@
         - kubeadm
         - kubectl
 
-# Install docker.io or cri-o.
+#    - name: Configure repo for docker.io package. 
+
+    - name: Install docker.io package.
+      package:
+        name: docker.io
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "docker" or container_runtime|lower == "docker.io"
+
+    - name: Install containerd package.
+      package:
+        name: containerd
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "containerd"
+
+    - name: Create symlink for containerd.
+      file:
+        src: /opt/cni/bin
+        dest: /var/lib/cni
+        state: link
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "containerd"
+
+#    - name: Configure containerd.
+#      lineinfile:
+#        path: /etc/containerd/config.toml
+#        regex: '^      bin_dir'
+#        line: '      bin_dir = "/opt/cni/bin/"'
+#      when:
+#        - container_runtime is defined
+#        - container_runtime|lower == "containerd"
+
+#    - name: Configure flannel for containerd.
+#      copy:
+#        dest: /run/flannel/subnet.env
+#        content: |
+#                 FLANNEL_NETWORK=10.44.0.0/16
+#                 FLANNEL_SUBNET=10.44.0.1/24
+#                 FLANNEL_MTU=1450
+#                 FLANNEL_IPMASQ=true
+#      when:
+#        - container_runtime is defined
+#        - container_runtime|lower == "containerd"
+#        - cni_plugin is defined
+#        - cni_plugin|lower == "flannel"
+
+#root@kube07:~# cat /run/flannel/subnet.env
+#FLANNEL_NETWORK=10.44.0.0/16
+#FLANNEL_SUBNET=10.44.0.1/24
+#FLANNEL_MTU=1450
+#FLANNEL_IPMASQ=true
+
+    - name: Refresh facts.
+      set_fact:
+        container_runtime: "{{container_runtime}}"
+        kube_dns_domain: "{{kube_dns_domain}}"
+        cni_plugin: "{{cni_plugin}}"
+        pod_network_cidr: "{{pod_network_cidr}}"
 
 - hosts: masters
+  become: yes
   tasks:
-    - 
+    - name: Initialize Kubernetes stack.
+      run_once: True 
+      command: "kubeadm init --service-dns-domain {{ kube_dns_domain }} --pod-network-cidr {{ pod_network_cidr }}"
+      register: kubeadm_init
+
+    - name: Debug
+      debug:
+        msg: "{{kubeadm_init.stdout_lines}}"
+
+    - name: Extract our token hash.
+      set_fact:
+        kubeadm_token_hash_tmp: "{{kubeadm_init.stdout_lines|last}}"
+
+    - name: Transform token hash.
+      set_fact:
+        kubeadm_token_hash: "{{kubeadm_token_hash_tmp | regex_search('sha256:[a-z0-9]+')}}"
+
+    - name: Ensure we got it right.
+      debug:
+        msg:
+          - "{{kubeadm_token_hash}}"
+
+    - name: Pull our node registration token.
+      shell:
+        cmd: "kubeadm token list | tail -1 | awk '{print $1}'"
+      register: kubeadm_token
+
+    - name: Wait for kubectl to start responding.
+      wait_for:
+        host: localhost 
+        port: 6443
+#        delay: 10
+
+    - name: Initialize CNI Plugin (flannel)
+      shell:
+        cmd: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when:
+        - cni_plugin is defined
+        - cni_plugin|lower == "flannel"
+
+    - name: Wait for kubectl to start responding.
+      wait_for:
+        host: localhost
+        port: 6443
+#        delay: 10
+
+#    - name: Refresh facts.
+#      set_fact:
+#        cacheable: yes
+#        kubeadm_token: "{{kubeadm_token}}"
+#        kubeadm_token_hash: "{{kubeadm_token_hash}}"
+
+    - name: Store variables for next play.
+      add_host:
+        hostname: dummy
+        kubeadm_token: "{{kubeadm_token.stdout}}"
+        kubeadm_token_hash: "{{kubeadm_token_hash}}"
+        master_ip: "{{ansible_default_ipv4.address}}"
+
+- hosts: workers
+  become: yes
+  tasks:
+    - name: Check assertions.
+      assert:
+        that:
+          - hostvars['dummy']['kubeadm_token'] is defined
+          - hostvars['dummy']['kubeadm_token_hash'] is defined
+          - hostvars['dummy']['master_ip'] is defined
+
+    - name: Join the cluster.
+      command: "kubeadm join {{hostvars['dummy']['master_ip']}}:6443 --token {{hostvars['dummy']['kubeadm_token']}} --discovery-token-ca-cert-hash {{hostvars['dummy']['kubeadm_token_hash']}}"
+
+- hosts: masters
+  become: yes
+  tasks:
+    - name: Assign etcd role to first worker.
+      command: kubectl label node kube08 kubernetes.io/role=etcd
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Assign worker role to remaining workers.
+      command: kubectl label node kube09 kubernetes.io/role=worker
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
