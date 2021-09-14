@@ -1,0 +1,67 @@
+---
+- hosts: all
+  defaults:
+    container_runtime: docker
+  become: yes
+  tasks:
+    - name: Check assertions.
+      assert:
+        that:
+          - ansible_distribution == "Debian"
+
+    - name: Let iptables see bridged traffic
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: "br_netfilter"
+
+    - name: Manaully load br_netfilter once.
+      shell:
+        cmd: lsmod br_netfilter || modprobe br_netfilter
+
+    - name: Disable swap permanently.
+      mount:
+        fstype: swap
+        path: none
+        state: absent
+
+    - name: Disable swap now.
+      command: swapoff -a
+
+    - name: Install required packages.
+      package:
+        name: "{{ item }}"
+      loop:
+        - vim
+        - sudo
+        - glances
+        - curl
+        - apt-transport-https
+        - ca-certificates
+
+    - name: Configure Kubernetes apt source.
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" 
+
+    - name: Deploy keys for for Kubernetes apt source.
+      get_url:
+        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+    - name: Update apt cache.
+      apt:
+        update_cache: yes
+
+    - name: Install kubernetes packages.
+      package:
+        name: "{{ item }}"
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+# Install docker.io or cri-o.
+
+- hosts: masters
+  tasks:
+    - 
