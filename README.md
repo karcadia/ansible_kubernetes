@@ -16,8 +16,9 @@ Deploy multi-node Kubernetes stack with Ansible.
 * The /etc/hosts file will need to be sane with the hostname of the node referenced.
 
 ## Set
-Update the variables in the top of the playbook if required.
-`head -8 deploy_kube.yaml
+* Update the variables in the top of the playbook if required.
+```
+head -8 deploy_kube.yaml
 ---
 - hosts: all
   vars:
@@ -25,7 +26,8 @@ Update the variables in the top of the playbook if required.
     kube_dns_domain: kube.mccormicom.com
     cni_plugin: flannel
     pod_network_cidr: 10.42.0.0/16
-    install_basic_tools: yes`
+    install_basic_tools: yes
+```
 
 ## Go
 Run `ansible-playbook -i inventory deploy_kube.yaml` from your jumpbox.
