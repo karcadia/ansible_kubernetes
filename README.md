@@ -11,6 +11,14 @@ Deploy multi-node Kubernetes stack with Ansible.
 
 ## Ready
 * Update the provided inventory file to match your environment.
+```
+[masters]
+kube07.mccormicom.com
+
+[workers]
+kube08.mccormicom.com
+kube09.mccormicom.com
+```
 * SSH Keys and Host Keys should already be configured, just like any other Ansible playbook would require.
 * DNS entries will need to be in place for the kubernetes nodes.
 * The /etc/hosts file will need to be sane with the hostname of the node referenced.
@@ -18,7 +26,6 @@ Deploy multi-node Kubernetes stack with Ansible.
 ## Set
 * Update the variables in the top of the playbook if required.
 ```
-head -8 deploy_kube.yaml
 ---
 - hosts: all
   vars:
@@ -31,3 +38,6 @@ head -8 deploy_kube.yaml
 
 ## Go
 Run `ansible-playbook -i inventory deploy_kube.yaml` from your jumpbox.
+
+## Next steps
+* Optional: Add a static route for your pod and service networks.
