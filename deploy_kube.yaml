@@ -5,6 +5,7 @@
     kube_dns_domain: kube.mccormicom.com
     cni_plugin: flannel
     pod_network_cidr: 10.42.0.0/16
+    install_basic_tools: yes
   become: yes
   tasks:
     - name: Check assertions.
@@ -45,6 +46,9 @@
         - vim
         - sudo
         - curl
+      when:
+        - install_basic_tools is defined
+        - install_basic_tools|lower == "yes" or install_basic_tools|lower == "true"
 
     - name: Install required packages.
       package:
@@ -75,7 +79,7 @@
         - kubeadm
         - kubectl
 
-#    - name: Configure repo for docker.io package. 
+#    - name: Configure repo for docker.io package. Might be needed for Debian 10 but not Debian 11. 
 
     - name: Install docker.io package.
       package:
@@ -170,7 +174,6 @@
       wait_for:
         host: localhost 
         port: 6443
-#        delay: 10
 
     - name: Initialize CNI Plugin (flannel)
       shell:
@@ -185,13 +188,6 @@
       wait_for:
         host: localhost
         port: 6443
-#        delay: 10
-
-#    - name: Refresh facts.
-#      set_fact:
-#        cacheable: yes
-#        kubeadm_token: "{{kubeadm_token}}"
-#        kubeadm_token_hash: "{{kubeadm_token_hash}}"
 
     - name: Store variables for next play.
       add_host:
@@ -215,14 +211,26 @@
 
 - hosts: masters
   become: yes
+  run_once: true
   tasks:
+    - name: Generate a list of worker nodes.
+      shell:
+        cmd: "kubectl get node | grep '<none>' | awk '{print $1}' | sort"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_workers
+
+    - name: debug
+      debug:
+        msg: "{{kube_workers}}"
+
     - name: Assign etcd role to first worker.
-      command: kubectl label node kube08 kubernetes.io/role=etcd
+      command: "kubectl label node {{kube_workers.stdout_lines | first}} node-role.kubernetes.io/etcd="
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
     - name: Assign worker role to remaining workers.
-      command: kubectl label node kube09 kubernetes.io/role=worker
+      command: "kubectl label node {{item}} node-role.kubernetes.io/worker="
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
-
+      loop: "{{kube_workers.stdout_lines}}"
