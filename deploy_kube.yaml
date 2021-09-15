@@ -234,3 +234,8 @@
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       loop: "{{kube_workers.stdout_lines}}"
+
+    - name: Start up a test workload to ensure everything is working as expected.
+      command: "kubectl run --image nginx nginx"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf

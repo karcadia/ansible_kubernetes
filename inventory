@@ -1,0 +1,6 @@
+[masters]
+kube07.mccormicom.com
+
+[workers]
+kube08.mccormicom.com
+kube09.mccormicom.com
