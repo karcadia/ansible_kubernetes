@@ -3,18 +3,28 @@
   vars:
     container_runtime: cri-o 
     kube_dns_domain: kube.mccormicom.com
-    cni_plugin: flannel 
+    cni_plugin: calico
     pod_network_cidr: 10.244.0.0/16
     install_basic_tools: no 
-    kubeadm_reset: yes
+    kubeadm_reset: no 
+    flannel_manifest: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+    calico_manifest: "https://docs.projectcalico.org/manifests/calico.yaml"
+    weave_manifest: "https://cloud.weave.works/k8s/v1.16/net.yaml" 
+    control_plane_endpoint: kube.mccormicom.com
   become: yes
   tasks:
     - name: Check assertions.
       assert:
         that:
-          - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+          - (ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9) or
+            (ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6) or
+            ansible_distribution == "Archlinux"
           - container_runtime == "docker" or container_runtime == "containerd" or container_runtime == "cri-o"
-          - cni_plugin == "flannel" or cni_plugin == "calico"
+          - cni_plugin == "flannel" or cni_plugin == "calico" or cni_plugin == "weave"
+
+    - name: Still cant get containerd and debian to get along.
+      fail:
+      when: container_runtime == "containerd" and ansible_distribution == "Debian"
 
 # Prework
     - name: Let iptables see bridged traffic
@@ -24,7 +34,7 @@
 
 #    - name: Load overlay module for containerd.
 
-    - name: Manaully load br_netfilter once.
+    - name: Manually load br_netfilter once.
       shell:
         cmd: lsmod | grep br_netfilter || modprobe br_netfilter
 
@@ -59,54 +69,114 @@
       package:
         name: "{{ item }}"
       loop:
-        - apt-transport-https
         - ca-certificates
-        - gnupg
+
+    - name: Install required Redhat/CentOS packages.
+      package:
+        name: yum-utils
+      when:
+        - ansible_distribution == "CentOS"
 
 # Repos
+## Repos Debian
     - name: Configure Kubernetes apt source.
       copy:
         dest: /etc/apt/sources.list.d/kubernetes.list
         content: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" 
+      when:
+        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
 
     - name: Deploy keys for Kubernetes apt source.
       get_url:
         url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
         dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+      when:
+        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
 
 #    - name: Configure repo for docker.io package. Might be needed for Debian 10 but not Debian 11. 
 
-    - name: Configure repos for cri-o.
+## Repos Redhat
+    - name: Configure docker/containerd repo for Redhat family.
+      command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "docker" or container_runtime|lower == "containerd"
+        - ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6
+
+    - name: Configure cri-o repo for Redhat family.
+      command: "{{item}}" 
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "cri-o"
+        - ansible_distribution == "CentOS"
+      loop:
+        - yum-config-manager --add-repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/CentOS_8/devel:kubic:libcontainers:stable.repo
+        - yum-config-manager --add-repo https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.21:/1.21.2/CentOS_8/devel:kubic:libcontainers:stable:cri-o:1.21:1.21.2.repo 
+
+    - name: Configure kubernetes repo for Redhat family.
+      copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        content: |
+                 [kubernetes]
+                 name=Kubernetes
+                 baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+                 enabled=1
+                 gpgcheck=1
+                 repo_gpgcheck=1
+                 gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+      when:
+        - ansible_distribution == "CentOS"
+
+## Repos Debian
+    - name: Configure apt repos for cri-o.
       copy:
         dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
         content: "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_Testing/ /"
       when:
         - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
-        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+        - container_runtime|lower == "cri-o"
+        - ansible_distribution == "Debian"
 
-    - name: Configure repos for cri-o 1.21.
+    - name: Configure apt repos for cri-o 1.21.
       copy:
         dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.21.list 
         content: "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.21/Debian_Testing/ /"
       when:
         - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
-        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+        - container_runtime|lower == "cri-o"
+        - ansible_distribution == "Debian"
 
     - name: Drop in apt keys for cri-o.
       shell:
         cmd: "echo 'mQENBFtkV0cBCADStSTCG5qgYtzmWfymHZqxxhfwfS6fdHJcbGUeXsI5dxjeCWhsXarZm6rWZOd5WfSmpXhbKOyM6Ll+6bpSl5ICHLa6fcpizYWEPa8fpg9EGl0cF12GGgVLnnOZ6NIbsoW0LHt2YN0jn8xKVwyPp7KLHB2paZh+KuURERG406GXY/DgCxUxFfgdelym/gfmt3DSq6GAQRRGHyucMvPYm53r+jVcKsf2Bp6E1XAfqBrD5r0maaCUWvd7bi0B2Q0hIX0rfDCBpl4rFqvyaMPgn+Bkl6IW37zCkWIXqf1E5eDm/XzP881s+yAvi+JfDwt7AE+Hd2dSf273o3WUdYJGRwyZABEBAAGwDAAAZ3BnAQAAAAAAALQ4ZGV2ZWw6a3ViaWMgT0JTIFByb2plY3QgPGRldmVsOmt1YmljQGJ1aWxkLm9wZW5zdXNlLm9yZz6wDAAAZ3BnAgAAAAAAAIkBPgQTAQgAKAUCX3CSTgIbAwUJCCrrBwYLCQgHAwIGFQgCCQoLBBYCAwECHgECF4AACgkQTWQ5A3UGCqQdMQgAprQk+q7j4kGuJdAxKbWfrtzTW2X0lRh+HxOIck4y286wsanKIcSbwysbKbifOcFhVjLZee/pRRRNSj9AF9l00/v79rzdTyH8IDksN8qdrIFriFxQIvPWEo0ofBtEhgB/dAPWBTJ025ZcxqBlEY0l9N4mrFtwONPJY2w3oQOq6Ut7dxQ+zz51BettOKK2LtNEL3OeGp/8VSc8bqW+vTCluRHiu8fDCZyE6E/ISHTnRlQ+msbIrMftVO9aDCtYAZHu6eED1HYSRaUlHepE/G3Dvu62KLqJYxTWJFH8J6rVJ++duX5H4Lg6ql7ziTKSf7CtWoxznnoaeU+EOOS/6lAm97AGAANncGcAiEYEExECAAYFAltkV0cACgkQOzARt2udZSOoswCdF44NTN09DwhPFbNYhEMb9juP5ykAn0bcELvuKmgDwEwZMrPQkG8tPu9nsAYAAGdwZwA=' | base64 -d > /etc/apt/trusted.gpg.d/crio.gpg"
       when:
         - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
-        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+        - container_runtime|lower == "cri-o"
+        - ansible_distribution == "Debian"
 
 # Packages
+## Packages Debian
     - name: Update apt cache.
       apt:
         update_cache: yes
+      when:
+        - ansible_distribution == "Debian" or ansible_distribution == "Ubuntu" 
 
+## Packages Arch
+    - name: Gather the package facts.
+      command: pacman -Q
+      register: package_facts
+      changed_when: False
+      when: ansible_distribution == "Archlinux"
+
+    - name: Force Arch to replace iptables and install the kubernetes packages.
+      shell:
+        cmd: "(echo y ; echo Y) | pacman -S kube-apiserver kube-controller-manager kube-proxy kube-scheduler kubelet" 
+      when:
+        - ansible_distribution == "Archlinux"
+        - "'kubelet' not in package_facts.stdout"
+
+## Packages All Distros
     - name: Install kubernetes packages.
       package:
         name: "{{ item }}"
@@ -115,21 +185,30 @@
         - kubeadm
         - kubectl
 
-    - name: Install docker.io package.
+    - name: Pick a docker package name.
+      set_fact:
+        docker_package_name: "{{item.package}}"
+      when: container_runtime == "docker" and ansible_distribution == item.os
+      loop:
+        - { os: 'Debian', package: 'docker.io' }
+        - { os: 'CentOS', package: 'docker-ce' }
+        - { os: 'Archlinux', package: 'docker' }
+
+    - name: Install docker package.
       package:
-        name: docker.io
+        name: "{{docker_package_name}}" 
       when:
         - container_runtime is defined
-        - container_runtime|lower == "docker" or container_runtime|lower == "docker.io"
+        - container_runtime|lower == "docker" or container_runtime|lower == "docker.io" 
 
-    - name: Install containerd package.
+    - name: Install containerd package if selected.
       package:
         name: containerd
       when:
         - container_runtime is defined
         - container_runtime|lower == "containerd" or container_runtime|lower == "containerd.io"
 
-    - name: Install cri-o packages.
+    - name: Install cri-o packages if selected.
       package:
         name: "{{item}}" 
       when:
@@ -137,21 +216,62 @@
         - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
       loop:
         - cri-o
-        - cri-o-runc
+#        - cri-o-runc # Not available for Redhat, need to check if its truly needed for Debian.
 
-    - name: Enable and start cri-o if selected.
-      service:
-        name: crio
-        state: started
-        enabled: yes
+# Configs
+## Configs All Distros
+    - name: Configure containerd if selected.
+      copy:
+        src: containerd_config.toml
+        dest: /etc/containerd/config.toml
       when:
         - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
+        - container_runtime|lower == "containerd"
+        - ansible_distribution != "Archlinux"
+
+## Configs Arch
+    - name: Configure some default container repos for Arch.
+      copy:
+        dest: /etc/containers/registries.conf
+        content: |
+                 [registries.search]
+                 registries = ['registry.access.redhat.com', 'registry.redhat.io', 'docker.io', 'quay.io']
+      when:
+        - ansible_distribution == "Archlinux"
+        - container_runtime == "cri-o"
+
+## Configs Redhat
+    - name: Configure docker to use systemd cgroup driver.
+      copy:
+        dest: /etc/docker/daemon.json
+        content: |
+                 {
+                   "exec-opts": ["native.cgroupdriver=systemd"]
+                 }
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "docker" or container_runtime|lower == "docker.io"
+        - ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6
+
+# Services
+    - name: Enable and start the appropriate service.
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      when: container_runtime|regex_replace('-', '') == item or item == "kubelet"
+      loop:
+        - containerd
+        - docker
+        - crio
+        - kubelet
+
+# Notes on trying to get containerd working.
 
 #    - name: Create symlink for containerd.
 #      file:
 #        src: /opt/cni/bin
-#        dest: /var/lib/cni
+#        dest: /usr/lib/cni
 #        state: link
 #      when:
 #        - container_runtime is defined
@@ -186,65 +306,90 @@
 #FLANNEL_MTU=1450
 #FLANNEL_IPMASQ=true
 
-    - name: Refresh facts.
+# Actions
+    - name: Refresh facts to ensure they are available in future plays.
       set_fact:
         container_runtime: "{{container_runtime}}"
         kube_dns_domain: "{{kube_dns_domain}}"
         cni_plugin: "{{cni_plugin}}"
         pod_network_cidr: "{{pod_network_cidr}}"
         kubeadm_reset: "{{kubeadm_reset}}"
+        flannel_manifest: "{{flannel_manifest}}"
+        calico_manifest: "{{calico_manifest}}"
+        weave_manifest: "{{weave_manifest}}"
+        control_plane_endpoint: "{{control_plane_endpoint}}"
 
-- hosts: all
-  become: yes
-  tasks:
     - name: Reset kubeadm if requested.
       command: kubeadm reset -f
       when: kubeadm_reset
       failed_when: false
 
+    - name: Stop services if reset was requested.
+      service:
+        name: "{{item}}"
+        state: stopped 
+      when: kubeadm_reset
+      failed_when: false
+      loop:
+        - containerd
+        - docker
+        - crio
+        - kubelet
+
+    - name: Start only the requested runtime.
+      when: kubeadm_reset
+      service:
+        name: "{{container_runtime | regex_replace('-', '') }}"
+        state: started
+
+## Actions Redhat
+    - name: Kill the firewall. (Redhat family)
+      service:
+        name: firewalld
+        state: stopped
+      when:
+        - ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6 
+
 - hosts: masters
   become: yes
+  run_once: yes
   tasks:
     - name: Initialize Kubernetes stack.
-      run_once: True 
-      command: "kubeadm init --service-dns-domain {{ kube_dns_domain }} --pod-network-cidr {{ pod_network_cidr }}"
+      command: "kubeadm init --service-dns-domain {{ kube_dns_domain }} --pod-network-cidr {{ pod_network_cidr }} --control-plane-endpoint {{control_plane_endpoint}} --upload-certs"
       register: kubeadm_init
 
-    - name: Extract our token hash.
+    - name: Extract tokens from init command. 
       set_fact:
-        kubeadm_token_hash_tmp: "{{kubeadm_init.stdout_lines|last}}"
+        kubeadm_cert_key: "{{ (kubeadm_init.stdout | regex_search('[-][-]certificate-key[ ][a-z0-9]+')).split(' ')[1] }}"
+        kubeadm_token: "{{(kubeadm_init.stdout | regex_findall('[-][-]token[ ][a-z0-9.]+') | last).split(' ')[1]}}"
+        kubeadm_token_hash: "{{kubeadm_init.stdout | regex_findall('sha256:[a-z0-9]+') | last}}"
 
-    - name: Continue extracting token hash.
-      set_fact:
-        kubeadm_token_hash: "{{kubeadm_token_hash_tmp | regex_search('sha256:[a-z0-9]+')}}"
-
-    - name: Pull our node registration token.
-      shell:
-        cmd: "kubeadm token list | tail -1 | awk '{print $1}'"
-      register: kubeadm_token
+#    - name: debug extracted tokens 
+#      debug:
+#        msg:
+#          - "{{kubeadm_token}}"
+#          - "{{kubeadm_token_hash}}"
+#          - "{{kubeadm_cert_key}}"
 
     - name: Wait for kubectl to start responding.
       wait_for:
         host: localhost 
         port: 6443
 
-    - name: Initialize CNI Plugin (flannel)
-      shell:
-        cmd: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      when:
-        - cni_plugin is defined
-        - cni_plugin|lower == "flannel"
+    - name: Pick a CNI Plugin manifest.
+      set_fact:
+        cni_plugin_manifest: "{{ item }}"
+      when: cni_plugin|string in item
+      loop:
+        - "{{ flannel_manifest }}"
+        - "{{ calico_manifest }}"
+        - "{{ weave_manifest }}"
 
-    - name: Initialize CNI Plugin (calico)
+    - name: Initialize CNI Plugin.
       shell:
-        cmd: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml 
+        cmd: "kubectl apply -f {{cni_plugin_manifest}}"
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
-      when:
-        - cni_plugin is defined
-        - cni_plugin|lower == "calico"
 
     - name: Wait for kubectl to start responding.
       wait_for:
@@ -254,9 +399,57 @@
     - name: Store variables for next play.
       add_host:
         hostname: dummy
-        kubeadm_token: "{{kubeadm_token.stdout}}"
+        kubeadm_token: "{{kubeadm_token}}"
         kubeadm_token_hash: "{{kubeadm_token_hash}}"
         master_ip: "{{ansible_default_ipv4.address}}"
+
+- hosts: masters
+  become: yes
+  tasks:
+    - name: Join the cluster. (Secondary Masters)
+      command: "kubeadm join {{hostvars['dummy']['master_ip']}}:6443 --token {{hostvars['dummy']['kubeadm_token']}} --discovery-token-ca-cert-hash {{hostvars['dummy']['kubeadm_token_hash']}} --control-plane --certificate-key {{kubeadm_cert_key}}"
+      when:
+        - ansible_default_ipv4.address != hostvars['dummy']['master_ip']
+
+    - name: Generate a list of secondary masters.
+      run_once: yes
+      shell:
+        cmd: "kubectl get node | grep '<none>' | awk '{print $1}' | sort"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kube_secondary_masters
+      when:
+        - ansible_default_ipv4.address == hostvars['dummy']['master_ip']
+
+    - name: Store variables for next play.
+      add_host:
+        hostname: dummy
+        kube_secondary_masters: "{{kube_secondary_masters}}"
+
+- hosts: masters
+  become: yes
+  run_once: yes
+  tasks:
+    - name: Assign control-plane role to secondary master servers.
+      command: "kubectl label node {{item}} node-role.kubernetes.io/control-plane="
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      with_items:
+        - "{{hostvars['dummy']['kube_secondary_masters']['stdout_lines']}}"
+
+    - name: Assign master role to secondary master servers.
+      command: "kubectl label node {{item}} node-role.kubernetes.io/master="
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      with_items:
+        - "{{hostvars['dummy']['kube_secondary_masters']['stdout_lines']}}"
+
+#    - name: Assign etcd role to secondary master servers.
+#      command: "kubectl label node {{item}} node-role.kubernetes.io/etcd="
+#      environment:
+#        KUBECONFIG: /etc/kubernetes/admin.conf
+#      with_items:
+#        - "{{hostvars['dummy']['kube_secondary_masters']['stdout_lines']}}"
 
 - hosts: workers
   become: yes
@@ -268,12 +461,12 @@
           - hostvars['dummy']['kubeadm_token_hash'] is defined
           - hostvars['dummy']['master_ip'] is defined
 
-    - name: Join the cluster.
+    - name: Join the cluster. (Worker)
       command: "kubeadm join {{hostvars['dummy']['master_ip']}}:6443 --token {{hostvars['dummy']['kubeadm_token']}} --discovery-token-ca-cert-hash {{hostvars['dummy']['kubeadm_token_hash']}}"
 
 - hosts: masters
   become: yes
-  run_once: true
+  run_once: yes
   tasks:
     - name: Generate a list of worker nodes.
       shell:
@@ -281,11 +474,6 @@
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
       register: kube_workers
-
-    - name: Assign etcd role to first worker.
-      command: "kubectl label node {{kube_workers.stdout_lines | first}} node-role.kubernetes.io/etcd="
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
 
     - name: Assign worker role to all workers.
       command: "kubectl label node {{item}} node-role.kubernetes.io/worker="
