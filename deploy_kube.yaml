@@ -62,8 +62,7 @@
         - vim
         - sudo
         - curl
-      when:
-        - install_basic_tools
+      when: install_basic_tools
 
     - name: Install required packages.
       package:
@@ -74,9 +73,15 @@
     - name: Install required Redhat/CentOS packages.
       package:
         name: yum-utils
-      when:
-        - ansible_distribution == "CentOS"
+      when: ansible_distribution == "CentOS"
 
+    - name: Install required Debian packages.
+      package:
+        name: "{{ item }}"
+      when: ansible_distribution == "Debian"
+      loop:
+        - curl
+        - gnupg1
 # Repos
 ## Repos Debian
     - name: Configure Kubernetes apt source.
@@ -131,16 +136,16 @@
     - name: Configure apt repos for cri-o.
       copy:
         dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
-        content: "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_Testing/ /"
+        content: "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_11/ /"
       when:
         - container_runtime is defined
         - container_runtime|lower == "cri-o"
         - ansible_distribution == "Debian"
 
-    - name: Configure apt repos for cri-o 1.21.
+    - name: Configure apt repos for cri-o 1.25.
       copy:
-        dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.21.list 
-        content: "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.21/Debian_Testing/ /"
+        dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.25.list 
+        content: "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.25/Debian_11/ /"
       when:
         - container_runtime is defined
         - container_runtime|lower == "cri-o"
@@ -148,11 +153,14 @@
 
     - name: Drop in apt keys for cri-o.
       shell:
-        cmd: "echo 'mQENBFtkV0cBCADStSTCG5qgYtzmWfymHZqxxhfwfS6fdHJcbGUeXsI5dxjeCWhsXarZm6rWZOd5WfSmpXhbKOyM6Ll+6bpSl5ICHLa6fcpizYWEPa8fpg9EGl0cF12GGgVLnnOZ6NIbsoW0LHt2YN0jn8xKVwyPp7KLHB2paZh+KuURERG406GXY/DgCxUxFfgdelym/gfmt3DSq6GAQRRGHyucMvPYm53r+jVcKsf2Bp6E1XAfqBrD5r0maaCUWvd7bi0B2Q0hIX0rfDCBpl4rFqvyaMPgn+Bkl6IW37zCkWIXqf1E5eDm/XzP881s+yAvi+JfDwt7AE+Hd2dSf273o3WUdYJGRwyZABEBAAGwDAAAZ3BnAQAAAAAAALQ4ZGV2ZWw6a3ViaWMgT0JTIFByb2plY3QgPGRldmVsOmt1YmljQGJ1aWxkLm9wZW5zdXNlLm9yZz6wDAAAZ3BnAgAAAAAAAIkBPgQTAQgAKAUCX3CSTgIbAwUJCCrrBwYLCQgHAwIGFQgCCQoLBBYCAwECHgECF4AACgkQTWQ5A3UGCqQdMQgAprQk+q7j4kGuJdAxKbWfrtzTW2X0lRh+HxOIck4y286wsanKIcSbwysbKbifOcFhVjLZee/pRRRNSj9AF9l00/v79rzdTyH8IDksN8qdrIFriFxQIvPWEo0ofBtEhgB/dAPWBTJ025ZcxqBlEY0l9N4mrFtwONPJY2w3oQOq6Ut7dxQ+zz51BettOKK2LtNEL3OeGp/8VSc8bqW+vTCluRHiu8fDCZyE6E/ISHTnRlQ+msbIrMftVO9aDCtYAZHu6eED1HYSRaUlHepE/G3Dvu62KLqJYxTWJFH8J6rVJ++duX5H4Lg6ql7ziTKSf7CtWoxznnoaeU+EOOS/6lAm97AGAANncGcAiEYEExECAAYFAltkV0cACgkQOzARt2udZSOoswCdF44NTN09DwhPFbNYhEMb9juP5ykAn0bcELvuKmgDwEwZMrPQkG8tPu9nsAYAAGdwZwA=' | base64 -d > /etc/apt/trusted.gpg.d/crio.gpg"
+        cmd: "{{ item }}"
       when:
         - container_runtime is defined
         - container_runtime|lower == "cri-o"
         - ansible_distribution == "Debian"
+      loop:
+        - curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:1.25/Debian_11/Release.key | tac | tac | apt-key add -
+        - curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_11/Release.key         | tac | tac | apt-key add -
 
 # Packages
 ## Packages Debian
@@ -216,7 +224,7 @@
         - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
       loop:
         - cri-o
-#        - cri-o-runc # Not available for Redhat, need to check if its truly needed for Debian.
+        - cri-o-runc # Not available for Redhat, needed for Debian.
 
 # Configs
 ## Configs All Distros
@@ -385,16 +393,16 @@
         - "{{ calico_manifest }}"
         - "{{ weave_manifest }}"
 
+    - name: Wait for kubectl to start responding.
+      wait_for:
+        host: localhost
+        port: 6443
+
     - name: Initialize CNI Plugin.
       shell:
         cmd: "kubectl apply -f {{cni_plugin_manifest}}"
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
-
-    - name: Wait for kubectl to start responding.
-      wait_for:
-        host: localhost
-        port: 6443
 
     - name: Store variables for next play.
       add_host:
