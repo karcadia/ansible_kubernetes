@@ -5,12 +5,13 @@
     kube_dns_domain: kube.mccormicom.com
     cni_plugin: calico
     pod_network_cidr: 10.244.0.0/16
-    install_basic_tools: no 
-    kubeadm_reset: no 
+    install_basic_tools: no
+    kubeadm_reset: yes
+    disable_ipv6: True
     flannel_manifest: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
-    calico_manifest: "https://docs.projectcalico.org/manifests/calico.yaml"
+    calico_manifest: "https://raw.githubusercontent.com/projectcalico/calico/v3.25.1/manifests/calico.yaml"
     weave_manifest: "https://cloud.weave.works/k8s/v1.16/net.yaml" 
-    control_plane_endpoint: kube.mccormicom.com
+    control_plane_endpoint: kube-cp.mccormicom.com
   become: yes
   tasks:
     - name: Check assertions.
@@ -46,6 +47,32 @@
         state: present
         reload: yes
 
+    - name: Grab current default grub config.
+      shell:
+        cmd: grep GRUB_CMDLINE_LINUX /etc/default/grub | cut -d= -f2- | tr -d '"'
+      register: current_default_grub_config
+      when: disable_ipv6
+
+    - name: Disable IPv6 in grub config.
+      lineinfile:
+        path: /etc/default/grub
+        regexp: ^GRUB_CMDLINE_LINUX
+        line: "GRUB_CMDLINE_LINUX='{{ current_default_grub_config.stdout }} ipv6.disable=0'"
+      when:
+        - disable_ipv6
+        - "'ipv6.disable=0' not in current_default_grub_config.stdout"
+      register: grub_cfg_update
+
+    - name: Disable IPv6 immediately.
+      command: sysctl net.ipv6.conf.all.disable_ipv6=1
+      when: disable_ipv6
+
+    - name: Rebuild grub config.
+      command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when:
+        - disable_ipv6
+        - grub_cfg_update.changed
+
     - name: Disable swap permanently.
       mount:
         fstype: swap
@@ -69,6 +96,7 @@
         name: "{{ item }}"
       loop:
         - ca-certificates
+        - git
 
     - name: Install required Redhat/CentOS packages.
       package:
@@ -224,7 +252,16 @@
         - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
       loop:
         - cri-o
-        - cri-o-runc # Not available for Redhat, needed for Debian.
+
+    - name: Install cri-o-runc if crio and Debian selected.
+      package:
+        name: "{{item}}"
+      when:
+        - container_runtime is defined
+        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
+        - ansible_distribution == "Debian"
+      loop:
+        - cri-o-runc
 
 # Configs
 ## Configs All Distros
@@ -260,6 +297,17 @@
         - container_runtime is defined
         - container_runtime|lower == "docker" or container_runtime|lower == "docker.io"
         - ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6
+
+    - name: KeyPaths is invalid. KeyPath is valid. (CentOS Stream 9 Bug?)
+      lineinfile:
+        path: /etc/containers/policy.json
+        regexp: '"keyPaths":'
+        line: '                    "keyPath": "/etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release"'
+      when:
+        - ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6
+      loop:
+        - 1
+        - 2
 
 # Services
     - name: Enable and start the appropriate service.
@@ -362,8 +410,16 @@
   become: yes
   run_once: yes
   tasks:
+    - name: Pre-pull Kubernetes images.
+      command: kubeadm config images pull
+
     - name: Initialize Kubernetes stack.
-      command: "kubeadm init --service-dns-domain {{ kube_dns_domain }} --pod-network-cidr {{ pod_network_cidr }} --control-plane-endpoint {{control_plane_endpoint}} --upload-certs"
+      command: >
+               kubeadm init
+               --service-dns-domain {{ kube_dns_domain }}
+               --pod-network-cidr {{ pod_network_cidr }}
+               --control-plane-endpoint {{control_plane_endpoint}}
+               --upload-certs
       register: kubeadm_init
 
     - name: Extract tokens from init command. 
@@ -491,5 +547,28 @@
 
     - name: Start up a test workload to ensure everything is working as expected.
       command: "kubectl run --image nginx nginx"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Clone Ingress Controller repo.
+      git:
+        repo: https://github.com/nginxinc/kubernetes-ingress.git
+        dest: /tmp/ingress-controller/
+        version: v2.4.2
+
+    - name: Deploy an Ingress Controller.
+      shell:
+        cmd: |
+             kubectl apply -f /tmp/ingress-controller/deployments/common/ns-and-sa.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/rbac/rbac.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/default-server-secret.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/nginx-config.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/ingress-class.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/crds/k8s.nginx.org_virtualservers.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/crds/k8s.nginx.org_virtualserverroutes.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/crds/k8s.nginx.org_transportservers.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/crds/k8s.nginx.org_policies.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/common/crds/k8s.nginx.org_globalconfigurations.yaml
+             kubectl apply -f /tmp/ingress-controller/deployments/daemon-set/nginx-ingress.yaml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf

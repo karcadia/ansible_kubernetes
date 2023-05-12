@@ -1,7 +1,7 @@
 [masters]
-arch-kube01.mccormicom.com
+kube01.mccormicom.com
+kube02.mccormicom.com
 
 [workers]
-arch-kube02.mccormicom.com
-arch-kube03.mccormicom.com
-arch-kube04.mccormicom.com
+kube03.mccormicom.com
+kube04.mccormicom.com
