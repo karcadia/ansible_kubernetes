@@ -8,6 +8,7 @@
     install_basic_tools: no
     kubeadm_reset: yes
     disable_ipv6: True
+    kubernetes_dashboard: True
     flannel_manifest: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
     calico_manifest: "https://raw.githubusercontent.com/projectcalico/calico/v3.25.1/manifests/calico.yaml"
     weave_manifest: "https://cloud.weave.works/k8s/v1.16/net.yaml" 
@@ -374,6 +375,13 @@
         calico_manifest: "{{calico_manifest}}"
         weave_manifest: "{{weave_manifest}}"
         control_plane_endpoint: "{{control_plane_endpoint}}"
+        kubernetes_dashboard: "{{kubernetes_dashboard}}"
+
+    - name: Reset kubeadm for a master.
+      command: kubeadm reset -f
+      when: kubeadm_reset
+      failed_when: false
+      run_once: True
 
     - name: Reset kubeadm if requested.
       command: kubeadm reset -f
@@ -572,3 +580,30 @@
              kubectl apply -f /tmp/ingress-controller/deployments/daemon-set/nginx-ingress.yaml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Deploy the Kubernetes Dashboard if requested.
+      command: "{{ item }}"
+      when: kubernetes_dashboard
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      loop:
+        - kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+        - kubectl delete clusterrole kubernetes-dashboard
+        - kubectl create clusterrole kubernetes-dashboard --verb=* --resource=*.*
+        - kubectl create token kubernetes-dashboard -n kubernetes-dashboard
+      register: kubectl_kubernetes_dashboard
+
+    - name: Grab the Kubernetes Dashboard service IP.
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      shell:
+        cmd: "kubectl get service kubernetes-dashboard -n kubernetes-dashboard | awk '{print $3}' | tail -1"
+      when: kubernetes_dashboard
+      register: kubernetes_dashboard_service
+
+    - name: Use this token to finish your Kubernetes Dashboard config.
+      debug:
+        msg:
+          - "URL: https://{{ kubernetes_dashboard_service.stdout }}/#/workloads?namespace=_all"
+          - "Token: {{ kubectl_kubernetes_dashboard.results[-1].stdout_lines | last }}"
+      when: kubernetes_dashboard
