@@ -1,7 +1,7 @@
 ---
 - hosts: all
   vars:
-    container_runtime: cri-o 
+    container_runtime: cri-o
     kube_dns_domain: kube.mccormicom.com
     cni_plugin: calico
     pod_network_cidr: 10.244.0.0/16
@@ -9,16 +9,21 @@
     kubeadm_reset: yes
     disable_ipv6: True
     kubernetes_dashboard: True
-    flannel_manifest: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
-    calico_manifest: "https://raw.githubusercontent.com/projectcalico/calico/v3.25.1/manifests/calico.yaml"
-    weave_manifest: "https://cloud.weave.works/k8s/v1.16/net.yaml" 
+    cert_manager: True
+    cert_manager_manifest: https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.yaml
+    metrics_server: True
+    metrics_server_manifest: https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+    metrics_server_disable_tls_verify: True
+    flannel_manifest: https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+    calico_manifest: https://raw.githubusercontent.com/projectcalico/calico/release-v3.27/manifests/calico.yaml
+    weave_manifest: https://cloud.weave.works/k8s/v1.16/net.yaml
     control_plane_endpoint: kube-cp.mccormicom.com
   become: yes
   tasks:
     - name: Check assertions.
       assert:
         that:
-          - (ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9) or
+          - (ansible_distribution == "Debian" and ansible_distribution_major_version|int > 11) or
             (ansible_distribution == "CentOS" and ansible_distribution_major_version|int > 6) or
             ansible_distribution == "Archlinux"
           - container_runtime == "docker" or container_runtime == "containerd" or container_runtime == "cri-o"
@@ -69,7 +74,8 @@
       when: disable_ipv6
 
     - name: Rebuild grub config.
-      command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      shell:
+        cmd: grub2-mkconfig -o /boot/grub2/grub.cfg || grub-mkconfig -o /boot/grub/grub.cfg
       when:
         - disable_ipv6
         - grub_cfg_update.changed
@@ -98,6 +104,7 @@
       loop:
         - ca-certificates
         - git
+        - jq
 
     - name: Install required Redhat/CentOS packages.
       package:
@@ -110,22 +117,31 @@
       when: ansible_distribution == "Debian"
       loop:
         - curl
-        - gnupg1
+        - gpg
+#        - gnupg1
+
 # Repos
 ## Repos Debian
     - name: Configure Kubernetes apt source.
       copy:
         dest: /etc/apt/sources.list.d/kubernetes.list
-        content: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" 
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /"
       when:
-        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+        - ansible_distribution == "Debian"
 
     - name: Deploy keys for Kubernetes apt source.
       get_url:
-        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
-        dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+        url: https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.gpg.armor
       when:
-        - ansible_distribution == "Debian" and ansible_distribution_major_version|int > 9
+        - ansible_distribution == "Debian"
+
+    - name: Dearmor key for Kubernetes apt source.
+      shell:
+        cmd: gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /etc/apt/keyrings/kubernetes-apt-keyring.gpg.armor && rm /etc/apt/keyrings/kubernetes-apt-keyring.gpg.armor
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      when:
+        - ansible_distribution == "Debian"
 
 #    - name: Configure repo for docker.io package. Might be needed for Debian 10 but not Debian 11. 
 
@@ -141,7 +157,7 @@
       command: "{{item}}" 
       when:
         - container_runtime is defined
-        - container_runtime|lower == "cri-o"
+        - container_runtime == "cri-o"
         - ansible_distribution == "CentOS"
       loop:
         - yum-config-manager --add-repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/CentOS_8/devel:kubic:libcontainers:stable.repo
@@ -164,32 +180,30 @@
 ## Repos Debian
     - name: Configure apt repos for cri-o.
       copy:
-        dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
-        content: "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_11/ /"
+        dest: /etc/apt/sources.list.d/cri-o.list
+        content: "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.29/deb/ /"
       when:
         - container_runtime is defined
-        - container_runtime|lower == "cri-o"
+        - container_runtime == "cri-o"
         - ansible_distribution == "Debian"
 
-    - name: Configure apt repos for cri-o 1.25.
-      copy:
-        dest: /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.25.list 
-        content: "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.25/Debian_11/ /"
+    - name: Deploy keys for cri-o apt source.
+      get_url:
+        url: https://pkgs.k8s.io/addons:/cri-o:/stable:/v1.29/deb/Release.key
+        dest: /etc/apt/keyrings/cri-o-apt-keyring.gpg.armor
       when:
         - container_runtime is defined
-        - container_runtime|lower == "cri-o"
+        - container_runtime == "cri-o"
         - ansible_distribution == "Debian"
 
-    - name: Drop in apt keys for cri-o.
+    - name: Dearmor key for cri-o apt source.
       shell:
-        cmd: "{{ item }}"
+        cmd: gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg /etc/apt/keyrings/cri-o-apt-keyring.gpg.armor && rm /etc/apt/keyrings/cri-o-apt-keyring.gpg.armor
+        creates: /etc/apt/keyrings/cri-o-apt-keyring.gpg
       when:
         - container_runtime is defined
-        - container_runtime|lower == "cri-o"
+        - container_runtime == "cri-o"
         - ansible_distribution == "Debian"
-      loop:
-        - curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:1.25/Debian_11/Release.key | tac | tac | apt-key add -
-        - curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_11/Release.key         | tac | tac | apt-key add -
 
 # Packages
 ## Packages Debian
@@ -250,19 +264,9 @@
         name: "{{item}}" 
       when:
         - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
+        - container_runtime == "cri-o"
       loop:
         - cri-o
-
-    - name: Install cri-o-runc if crio and Debian selected.
-      package:
-        name: "{{item}}"
-      when:
-        - container_runtime is defined
-        - container_runtime|lower == "crio" or container_runtime|lower == "cri-o"
-        - ansible_distribution == "Debian"
-      loop:
-        - cri-o-runc
 
 # Configs
 ## Configs All Distros
@@ -376,6 +380,11 @@
         weave_manifest: "{{weave_manifest}}"
         control_plane_endpoint: "{{control_plane_endpoint}}"
         kubernetes_dashboard: "{{kubernetes_dashboard}}"
+        cert_manager: "{{cert_manager}}"
+        cert_manager_manifest: "{{cert_manager_manifest}}"
+        metrics_server: "{{metrics_server}}"
+        metrics_server_manifest: "{{metrics_server_manifest}}"
+        metrics_server_disable_tls_verify: "{{metrics_server_disable_tls_verify}}"
 
     - name: Reset kubeadm for a master.
       command: kubeadm reset -f
@@ -551,7 +560,7 @@
       command: "kubectl label node {{item}} node-role.kubernetes.io/worker="
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
-      loop: "{{kube_workers.stdout_lines}}"
+      loop: "{{ kube_workers.stdout_lines }}"
 
     - name: Start up a test workload to ensure everything is working as expected.
       command: "kubectl run --image nginx nginx"
@@ -581,6 +590,48 @@
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
 
+    - name: Deploy Cert-Manager.
+      command: "kubectl apply -f {{cert_manager_manifest}}"
+      when: cert_manager
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Deploy Metrics-Server.
+      command: "kubectl apply -f {{metrics_server_manifest}}"
+      when: metrics_server
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Pull existing Metrics Server config.
+      shell:
+        cmd: "kubectl get deploy/metrics-server -n kube-system -o json | jq .spec.template.spec.containers[].args | grep -v '[[]' | grep -v '[]]'"
+      when: metrics_server_disable_tls_verify
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: metrics_server_args
+
+    - name: Add the insecure-tls flag to the metric server args.
+      set_fact:
+        new_metrics_args: "{{ metrics_server_args.stdout | regex_replace('\"', '') | regex_replace(',\n', '\n') | replace(' ', '') | split('\n') + ['--kubelet-insecure-tls'] }}"
+      when: metrics_server_disable_tls_verify
+
+    - name: Ensure we match the expected json format.
+      set_fact:
+        new_metrics_args: "{{ new_metrics_args | to_json }}"
+      when: metrics_server_disable_tls_verify
+
+    - name: Disable TLS verification for Metrics Server.
+      command: |
+               kubectl patch deployment metrics-server -n kube-system -p '{"spec": {"template": {"spec": {"containers": [{"name": "metrics-server", "args": {{ new_metrics_args }} }]}}}}'
+      when: metrics_server_disable_tls_verify
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Wait a moment for cert-manager to be available.
+      pause:
+        seconds: 15
+      when: cert_manager
+
     - name: Deploy the Kubernetes Dashboard if requested.
       command: "{{ item }}"
       when: kubernetes_dashboard
@@ -588,6 +639,7 @@
         KUBECONFIG: /etc/kubernetes/admin.conf
       loop:
         - kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+#       - kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v3.0.0-alpha0/charts/kubernetes-dashboard.yaml
         - kubectl delete clusterrole kubernetes-dashboard
         - kubectl create clusterrole kubernetes-dashboard --verb=* --resource=*.*
         - kubectl create token kubernetes-dashboard -n kubernetes-dashboard
